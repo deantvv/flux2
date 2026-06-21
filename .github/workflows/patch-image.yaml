@@ -30,14 +30,12 @@ jobs:
             REPO="$SOURCE"
           fi
           IMAGE_NAME="$(basename "$REPO")"
-          PATCHED_TAG="${TAG}-patched"
           {
             echo "source=$SOURCE"
             echo "tag=$TAG"
             echo "image-name=$IMAGE_NAME"
-            echo "local-src=localhost:5000/${IMAGE_NAME}:${TAG}"
-            echo "local-dst=localhost:5000/${IMAGE_NAME}:${PATCHED_TAG}"
-            echo "target=ghcr.io/${{ github.repository_owner }}/${IMAGE_NAME}:${PATCHED_TAG}"
+            echo "mirror=ghcr.io/${{ github.repository_owner }}/${IMAGE_NAME}:${TAG}"
+            echo "target=ghcr.io/${{ github.repository_owner }}/${IMAGE_NAME}:${TAG}-patched"
           } >> "$GITHUB_OUTPUT"
 
       - name: Login to GitHub Container Registry
@@ -47,42 +45,34 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      # Copa derives the output registry from the source image reference.
-      # We route through a local registry so copa can push without needing
-      # write access to the upstream registry (e.g. ghcr.io/fluxcd).
-      - name: Start temporary local registry
-        run: docker run -d -p 5000:5000 --name local-registry registry:2
-
-      - name: Pull source image into local registry
+      # Copa derives the output registry from the source image reference, so
+      # we mirror the upstream image into our own GHCR namespace first.  This
+      # gives copa a registry it can both read from and write back to, and
+      # avoids the localhost:port parsing bug in copa-action.
+      - name: Mirror source image into our GHCR namespace
         run: |
           docker pull ${{ steps.img.outputs.source }}
-          docker tag  ${{ steps.img.outputs.source }} ${{ steps.img.outputs.local-src }}
-          docker push ${{ steps.img.outputs.local-src }}
+          docker tag  ${{ steps.img.outputs.source }} ${{ steps.img.outputs.mirror }}
+          docker push ${{ steps.img.outputs.mirror }}
 
       - name: Scan with Trivy (generate copa input report)
         uses: aquasecurity/trivy-action@v0.36.0
         with:
-          image-ref: ${{ steps.img.outputs.local-src }}
+          image-ref: ${{ steps.img.outputs.mirror }}
           format: json
           output: trivy-report.json
           vuln-type: os
           ignore-unfixed: false
 
       # Copa reads the Trivy report and upgrades only the affected OS packages,
-      # then pushes the patched image back to the local registry.
+      # then pushes the result to ghcr.io/<owner>/<name>:<tag>-patched.
       - name: Patch image with copa
         uses: project-copacetic/copa-action@v1.2.1
         with:
-          image: ${{ steps.img.outputs.local-src }}
+          image: ${{ steps.img.outputs.mirror }}
           image-report: trivy-report.json
           patched-tag: ${{ steps.img.outputs.tag }}-patched
           timeout: 5m
-
-      - name: Push patched image to GHCR
-        run: |
-          docker pull ${{ steps.img.outputs.local-dst }}
-          docker tag  ${{ steps.img.outputs.local-dst }} ${{ steps.img.outputs.target }}
-          docker push ${{ steps.img.outputs.target }}
 
       # Fail the workflow if any fixable CRITICAL/HIGH OS CVE is still present.
       - name: Verify - scan patched image
