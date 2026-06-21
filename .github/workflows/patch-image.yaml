@@ -4,9 +4,17 @@ on:
   workflow_dispatch:
     inputs:
       source-image:
-        description: 'Full source image reference to patch (e.g. ghcr.io/fluxcd/source-watcher:v2.1.1)'
+        description: 'Full source image reference (e.g. ghcr.io/fluxcd/source-watcher:v2.1.1)'
         required: true
         default: 'ghcr.io/fluxcd/source-watcher:v2.1.1'
+      patch-mode:
+        description: '"os" patches OS packages only; "extreme" also patches app-level dependencies (Python/Node/Go) via copa experimental features'
+        required: true
+        default: 'os'
+        type: choice
+        options:
+          - os
+          - extreme
 
 permissions:
   contents: read
@@ -30,12 +38,15 @@ jobs:
             REPO="$SOURCE"
           fi
           IMAGE_NAME="$(basename "$REPO")"
+          MODE="${{ inputs.patch-mode }}"
           {
             echo "source=$SOURCE"
             echo "tag=$TAG"
             echo "image-name=$IMAGE_NAME"
             echo "mirror=ghcr.io/${{ github.repository_owner }}/${IMAGE_NAME}:${TAG}"
-            echo "target=ghcr.io/${{ github.repository_owner }}/${IMAGE_NAME}:${TAG}-patched"
+            echo "target=ghcr.io/${{ github.repository_owner }}/${IMAGE_NAME}:${TAG}-patched-${MODE}"
+            # Trivy must scan os,library in extreme mode to produce the report copa needs.
+            echo "vuln-type=$( [[ "$MODE" == "extreme" ]] && echo 'os,library' || echo 'os' )"
           } >> "$GITHUB_OUTPUT"
 
       - name: Login to GitHub Container Registry
@@ -45,10 +56,9 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      # Copa derives the output registry from the source image reference, so
-      # we mirror the upstream image into our own GHCR namespace first.  This
-      # gives copa a registry it can both read from and write back to, and
-      # avoids the localhost:port parsing bug in copa-action.
+      # Copa derives the output registry from the source image reference, so we
+      # mirror the upstream image into our own GHCR namespace first. This gives
+      # copa a registry it can both read from and write back to.
       - name: Mirror source image into our GHCR namespace
         run: |
           docker pull ${{ steps.img.outputs.source }}
@@ -61,29 +71,63 @@ jobs:
           image-ref: ${{ steps.img.outputs.mirror }}
           format: json
           output: trivy-report.json
-          vuln-type: os
+          vuln-type: ${{ steps.img.outputs.vuln-type }}
           ignore-unfixed: false
 
-      # Copa reads the Trivy report and upgrades only the affected OS packages.
-      # It exports the result to the local docker daemon (not pushed yet).
-      - name: Patch image with copa
+      # ── OS mode ─────────────────────────────────────────────────────────────
+      # Copa-action handles buildkitd setup internally.
+      - name: Patch OS packages with copa (os mode)
+        if: inputs.patch-mode == 'os'
         uses: project-copacetic/copa-action@v1.2.1
         with:
           image: ${{ steps.img.outputs.mirror }}
           image-report: trivy-report.json
-          patched-tag: ${{ steps.img.outputs.tag }}-patched
+          patched-tag: ${{ steps.img.outputs.tag }}-patched-os
           timeout: 5m
 
+      # ── Extreme mode ─────────────────────────────────────────────────────────
+      # Copa's app-level patching is experimental and requires flags that
+      # copa-action does not expose, so we install the binary and run it directly.
+      - name: Setup Docker Buildx (extreme mode)
+        if: inputs.patch-mode == 'extreme'
+        uses: docker/setup-buildx-action@d7f5e7f509e45cec5c76c4d5afdd7de93d0b3df5 # v4.1.0
+        with:
+          driver: docker-container
+          driver-opts: network=host
+
+      - name: Install copa v0.14.1 (extreme mode)
+        if: inputs.patch-mode == 'extreme'
+        run: |
+          curl -fsSL https://github.com/project-copacetic/copacetic/releases/download/v0.14.1/copa_0.14.1_linux_amd64.tar.gz \
+            | tar xz copa
+          sudo mv copa /usr/local/bin/copa
+          copa version
+
+      - name: Patch OS + app-level packages with copa (extreme mode)
+        if: inputs.patch-mode == 'extreme'
+        env:
+          COPA_EXPERIMENTAL: "1"
+        run: |
+          copa patch \
+            --image      ${{ steps.img.outputs.mirror }} \
+            --report     trivy-report.json \
+            --tag        ${{ steps.img.outputs.tag }}-patched-extreme \
+            --pkg-types  os,library \
+            --library-patch-level patch \
+            --addr       buildx://$(docker buildx ls --format '{{.Name}}' | head -1) \
+            --timeout    10m
+
+      # ── Shared ───────────────────────────────────────────────────────────────
       - name: Push patched image to GHCR
         run: docker push ${{ steps.img.outputs.target }}
 
-      # Fail the workflow if any fixable CRITICAL/HIGH OS CVE is still present.
+      # Fail the workflow if any fixable CRITICAL/HIGH CVE is still present.
       - name: Verify - scan patched image
         uses: aquasecurity/trivy-action@v0.36.0
         with:
           image-ref: ${{ steps.img.outputs.target }}
           format: table
           exit-code: '1'
-          vuln-type: os
+          vuln-type: ${{ steps.img.outputs.vuln-type }}
           severity: CRITICAL,HIGH
           ignore-unfixed: true
