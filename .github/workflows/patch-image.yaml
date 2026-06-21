@@ -15,6 +15,10 @@ on:
         options:
           - os
           - extreme
+      go-vcs-url:
+        description: '(extreme mode, optional) Explicit Go source repo and ref for binary rebuild, e.g. https://github.com/org/repo@v1.2.3. Copa auto-detects from embedded VCS metadata; only needed for stripped binaries.'
+        required: false
+        default: ''
 
 permissions:
   contents: read
@@ -103,33 +107,43 @@ jobs:
           sudo mv copa /usr/local/bin/copa
           copa --version
 
+      # Copa rebuilds Go binaries by extracting VCS metadata embedded in the
+      # binary (via `go version -m`), pulling the source, updating go.mod, and
+      # recompiling. --toolchain-patch-level upgrades the Go compiler itself to
+      # fix stdlib CVEs. --go-vcs-url is only needed when VCS info is stripped.
       - name: Patch OS + app-level packages with copa (extreme mode)
         if: inputs.patch-mode == 'extreme'
         env:
           COPA_EXPERIMENTAL: "1"
         run: |
+          VCS_FLAG=""
+          if [[ -n "${{ inputs.go-vcs-url }}" ]]; then
+            VCS_FLAG="--go-vcs-url ${{ inputs.go-vcs-url }}"
+          fi
           copa patch \
-            --image      ${{ steps.img.outputs.mirror }} \
-            --report     trivy-report.json \
-            --tag        ${{ steps.img.outputs.tag }}-patched-extreme \
-            --pkg-types  os,library \
-            --library-patch-level patch \
-            --addr       buildx://$(docker buildx ls --format '{{.Name}}' | head -1) \
-            --timeout    10m
+            --image                ${{ steps.img.outputs.mirror }} \
+            --report               trivy-report.json \
+            --tag                  ${{ steps.img.outputs.tag }}-patched-extreme \
+            --pkg-types            os,library \
+            --library-patch-level  patch \
+            --toolchain-patch-level patch \
+            --ignore-errors \
+            --addr                 buildx://$(docker buildx ls --format '{{.Name}}' | head -1) \
+            --timeout              15m \
+            $VCS_FLAG
 
       # ── Shared ───────────────────────────────────────────────────────────────
       - name: Push patched image to GHCR
         run: docker push ${{ steps.img.outputs.target }}
 
-      # Verify OS packages are clean. We always use vuln-type:os here because
-      # copa cannot patch pre-compiled Go/Java binaries — those CVEs require
-      # rebuilding from source and are out of scope for image-level patching.
-      - name: Verify - scan patched image (OS packages)
+      # In extreme mode, verify both OS packages and app-level (Go binary) CVEs.
+      # In os mode, verify OS packages only.
+      - name: Verify - scan patched image
         uses: aquasecurity/trivy-action@v0.36.0
         with:
           image-ref: ${{ steps.img.outputs.target }}
           format: table
           exit-code: '1'
-          vuln-type: os
+          vuln-type: ${{ steps.img.outputs.vuln-type }}
           severity: CRITICAL,HIGH
           ignore-unfixed: true
