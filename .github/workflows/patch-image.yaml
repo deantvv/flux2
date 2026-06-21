@@ -99,9 +99,9 @@ jobs:
         if: inputs.patch-mode == 'extreme'
         run: |
           curl -fsSL https://github.com/project-copacetic/copacetic/releases/download/v0.14.1/copa_0.14.1_linux_amd64.tar.gz \
-            | tar xz copa
+            | tar xzf - copa
           sudo mv copa /usr/local/bin/copa
-          copa version
+          copa --version
 
       - name: Patch OS + app-level packages with copa (extreme mode)
         if: inputs.patch-mode == 'extreme'
