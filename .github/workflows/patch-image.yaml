@@ -1,0 +1,99 @@
+name: patch-image
+
+on:
+  workflow_dispatch:
+    inputs:
+      source-image:
+        description: 'Full source image reference to patch (e.g. ghcr.io/fluxcd/source-watcher:v2.1.1)'
+        required: true
+        default: 'ghcr.io/fluxcd/source-watcher:v2.1.1'
+
+permissions:
+  contents: read
+
+jobs:
+  patch-and-publish:
+    runs-on: ubuntu-latest
+    permissions:
+      packages: write
+    steps:
+      # Split "registry/org/name:tag" into the parts used by later steps.
+      - name: Parse image reference
+        id: img
+        run: |
+          SOURCE="${{ inputs.source-image }}"
+          if [[ "$SOURCE" == *":"* ]]; then
+            TAG="${SOURCE##*:}"
+            REPO="${SOURCE%:*}"
+          else
+            TAG="latest"
+            REPO="$SOURCE"
+          fi
+          IMAGE_NAME="$(basename "$REPO")"
+          PATCHED_TAG="${TAG}-patched"
+          {
+            echo "source=$SOURCE"
+            echo "tag=$TAG"
+            echo "image-name=$IMAGE_NAME"
+            echo "local-src=localhost:5000/${IMAGE_NAME}:${TAG}"
+            echo "local-dst=localhost:5000/${IMAGE_NAME}:${PATCHED_TAG}"
+            echo "target=ghcr.io/${{ github.repository_owner }}/${IMAGE_NAME}:${PATCHED_TAG}"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Login to GitHub Container Registry
+        uses: docker/login-action@650006c6eb7dba73a995cc03b0b2d7f5ca915bee # v4.2.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # Copa derives the output registry from the source image reference.
+      # We route through a local registry so copa can push without needing
+      # write access to the upstream registry (e.g. ghcr.io/fluxcd).
+      - name: Start temporary local registry
+        run: docker run -d -p 5000:5000 --name local-registry registry:2
+
+      - name: Pull source image into local registry
+        run: |
+          docker pull ${{ steps.img.outputs.source }}
+          docker tag  ${{ steps.img.outputs.source }} ${{ steps.img.outputs.local-src }}
+          docker push ${{ steps.img.outputs.local-src }}
+
+      # TODO: pin to a SHA; see https://github.com/aquasecurity/trivy-action/releases
+      - name: Scan with Trivy (generate copa input report)
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          image-ref: ${{ steps.img.outputs.local-src }}
+          format: json
+          output: trivy-report.json
+          vuln-type: os
+          ignore-unfixed: false
+
+      # Copa reads the Trivy report and upgrades only the affected OS packages,
+      # then pushes the patched image back to the local registry.
+      # TODO: pin to a SHA; see https://github.com/project-copacetic/copa-action/releases
+      - name: Patch image with copa
+        uses: project-copacetic/copa-action@v1.2.1
+        with:
+          image: ${{ steps.img.outputs.local-src }}
+          image-report: trivy-report.json
+          patched-tag: ${{ steps.img.outputs.tag }}-patched
+          timeout: 5m
+
+      - name: Push patched image to GHCR
+        run: |
+          docker pull ${{ steps.img.outputs.local-dst }}
+          docker tag  ${{ steps.img.outputs.local-dst }} ${{ steps.img.outputs.target }}
+          docker push ${{ steps.img.outputs.target }}
+
+      # Fail the workflow if any fixable CRITICAL/HIGH OS CVE is still present.
+      # TODO: pin to a SHA; see https://github.com/aquasecurity/trivy-action/releases
+      - name: Verify - scan patched image
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          image-ref: ${{ steps.img.outputs.target }}
+          format: table
+          exit-code: '1'
+          vuln-type: os
+          severity: CRITICAL,HIGH
+          ignore-unfixed: true
