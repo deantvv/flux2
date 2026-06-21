@@ -121,13 +121,15 @@ jobs:
       - name: Push patched image to GHCR
         run: docker push ${{ steps.img.outputs.target }}
 
-      # Fail the workflow if any fixable CRITICAL/HIGH CVE is still present.
-      - name: Verify - scan patched image
+      # Verify OS packages are clean. We always use vuln-type:os here because
+      # copa cannot patch pre-compiled Go/Java binaries — those CVEs require
+      # rebuilding from source and are out of scope for image-level patching.
+      - name: Verify - scan patched image (OS packages)
         uses: aquasecurity/trivy-action@v0.36.0
         with:
           image-ref: ${{ steps.img.outputs.target }}
           format: table
           exit-code: '1'
-          vuln-type: ${{ steps.img.outputs.vuln-type }}
+          vuln-type: os
           severity: CRITICAL,HIGH
           ignore-unfixed: true
