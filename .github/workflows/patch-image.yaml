@@ -64,8 +64,8 @@ jobs:
           vuln-type: os
           ignore-unfixed: false
 
-      # Copa reads the Trivy report and upgrades only the affected OS packages,
-      # then pushes the result to ghcr.io/<owner>/<name>:<tag>-patched.
+      # Copa reads the Trivy report and upgrades only the affected OS packages.
+      # It exports the result to the local docker daemon (not pushed yet).
       - name: Patch image with copa
         uses: project-copacetic/copa-action@v1.2.1
         with:
@@ -73,6 +73,9 @@ jobs:
           image-report: trivy-report.json
           patched-tag: ${{ steps.img.outputs.tag }}-patched
           timeout: 5m
+
+      - name: Push patched image to GHCR
+        run: docker push ${{ steps.img.outputs.target }}
 
       # Fail the workflow if any fixable CRITICAL/HIGH OS CVE is still present.
       - name: Verify - scan patched image
