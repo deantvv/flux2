@@ -59,9 +59,8 @@ jobs:
           docker tag  ${{ steps.img.outputs.source }} ${{ steps.img.outputs.local-src }}
           docker push ${{ steps.img.outputs.local-src }}
 
-      # TODO: pin to a SHA; see https://github.com/aquasecurity/trivy-action/releases
       - name: Scan with Trivy (generate copa input report)
-        uses: aquasecurity/trivy-action@0.28.0
+        uses: aquasecurity/trivy-action@v0.36.0
         with:
           image-ref: ${{ steps.img.outputs.local-src }}
           format: json
@@ -71,7 +70,6 @@ jobs:
 
       # Copa reads the Trivy report and upgrades only the affected OS packages,
       # then pushes the patched image back to the local registry.
-      # TODO: pin to a SHA; see https://github.com/project-copacetic/copa-action/releases
       - name: Patch image with copa
         uses: project-copacetic/copa-action@v1.2.1
         with:
@@ -87,9 +85,8 @@ jobs:
           docker push ${{ steps.img.outputs.target }}
 
       # Fail the workflow if any fixable CRITICAL/HIGH OS CVE is still present.
-      # TODO: pin to a SHA; see https://github.com/aquasecurity/trivy-action/releases
       - name: Verify - scan patched image
-        uses: aquasecurity/trivy-action@0.28.0
+        uses: aquasecurity/trivy-action@v0.36.0
         with:
           image-ref: ${{ steps.img.outputs.target }}
           format: table
